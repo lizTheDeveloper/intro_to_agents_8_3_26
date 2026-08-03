@@ -1,0 +1,24 @@
+**User‑Generated Memory Entry**
+
+| Field | Content |
+|-------|---------|
+| **User Intent** | To store a concise “memory” of the current conversation so that future chats can reference the extracted facts, video details, and key take‑aways without restating them. |
+| **Environment Context** | The assistant just completed a YouTube‑transcript fetch for video **F3lL98Pj90o**. The user now wants a durable record of that transcript’s substance, plus any surrounding context (topic, speaker cues, etc.). This memory will be used to answer follow‑up questions about the video or its concepts. |
+| **Key Video Identifiers** | - **Video ID:** *F3lL98Pj90o*  <br> - **Title (inferred from transcript):** *“Wayfinder – Planning Work Across Multiple AI Sessions”* |
+| **Core Concepts Summarized** | 1. **Unlimited Planning Scope** – The Wayfinder technique lets an AI or planner handle arbitrarily large work chunks across multiple sessions, unlike previous tools limited to a single session. <br> 2. **“Fog of War” Metaphor** – Planning proceeds even when the path isn’t clear; the system acknowledges uncertainty and gradually clears it. <br> 3. **Dependent Decision Mapping** – Recognizes inter‑related tasks and can schedule them intelligently. <br> 4. **Parallel Planning** – Multiple sub‑tasks can be explored concurrently. <br> 5. **Software‑Fundamentals Foundations** – Built on classic project‑management/engineering planning principles that the creator (a former “real developer”) applied to AI. <br> 6. **Skill Repository Integration** – Wayfinder is packaged as a reusable “skill” in a `skills repo`; developers can import and call it as a primitive. |
+| **Excerpted Snippets (Key Takeaways)** | - *“You can plan enormous chunks of work and it will orchestrate the planning over multiple types of sessions.”* <br> - *“It knows that you can’t make your way cleanly to the destination. You have to clear the fog of war.”* <br> - *“Some work is bigger than what you can fit into the context window… you’ll often take time ahead of these AI agent sessions to break it down into smaller chunks.”* <br> - *“This has been out there for a while and people are freaking loving this thing.”* |
+| **Developer‑Oriented Details** | - **Skill Name:** *wayfinder* <br> - **Interface Feature:** A “gorgeous little star map” that lets you “take tasks as you go.” <br> - **Legacy Primitive:** Still ties back to the “grill me” or “grill with doc” skill, but now works beyond a single session. <br> - **Technical Limitation Addressed:** Reduces token‑budget pressure by planning in advance and chunking work ahead of time. |
+| **Potential Future Reference Points** | - When the user asks *“What is Wayfinder?”* → reply with this memory’s “Core Concepts” section. <br> - If they request a **step‑by‑step planning workflow** → reference the “break it down into smaller chunks” snippet and the “star map” visual planning tool. <br> - For **comparisons** with other planning primitives → mention the distinction between single‑session “grill” primitives and the multi‑session Wayfinder approach. <br> - If they inquire about **implementation** → cite that Wayfinder is stored in a *skills repo* and can be imported as a module. |
+| **Short Summary (One‑Sentence Elevator Pitch)** | *Wayfinder is a planning skill that lets developers outline large‑scale, multi‑session workflows—clearing the “fog of war”—by breaking tasks into manageable chunks, supporting parallel exploration, and anchoring the process on proven software‑engineering fundamentals.* |
+
+--- 
+
+**How to Use This Memory**
+
+- **Reference**: When future queries mention *“Wayfinder,” “planning work,” “multi‑session,”* or *“star map,”* retrieve this entry to provide consistent, context‑rich answers.  
+- **Update**: If new information arrives (e.g., additional excerpts, user clarification, or a related video), append it to the relevant bullet points.  
+- **Context Awareness**: Keep this entry handy to remind you of the user’s focus on **AI‑assisted planning**, **multi‑session scalability**, and **practical tooling** rather than generic AI chatter.  
+
+--- 
+
+*End of Memory Entry*

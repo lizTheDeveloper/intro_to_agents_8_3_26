@@ -1,0 +1,29 @@
+# fast-agent looks for this exact filename (fast-agent.yaml) in .fast-agent/ then cwd.
+# API keys are NOT set here - they come from .env as OPENROUTER__API_KEY (double underscore).
+
+default_model: openrouter.openai/gpt-5.4-mini
+
+logger:
+  level: error
+  truncate_tools: true
+
+# fast-agent instruments the OpenAI/Anthropic SDKs and MCP with OpenTelemetry itself.
+# The Basic auth header is set from .env in fast_agent_framework_agent.py.
+otel:
+  enabled: true
+  service_name: intro-to-agents
+  otlp_endpoint: "https://us.cloud.langfuse.com/api/public/otel/v1/traces"
+  console_debug: false
+
+mcp:
+  servers:
+    # https://github.com/bighippoman/intercept-mcp
+    # Fetches web content (YouTube, arXiv, PDFs, Wikipedia, GitHub) as clean markdown.
+    # Agents must opt in: @fast.agent(servers=["intercept"], ...)
+    intercept:
+      command: "npx"
+      args: ["-y", "intercept-mcp"]
+    memory:
+      command: "npx"
+      args: ["-y", "@modelcontextprotocol/server-memory"]
+

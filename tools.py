@@ -1,6 +1,26 @@
 import os
+import re
 import subprocess
 import requests
+
+
+def clean_vtt(vtt_text):
+    """Strip VTT timing/markup and collapse YouTube's rolling captions into plain text."""
+    lines = []
+    for line in vtt_text.splitlines():
+        ## skip headers, cue timings, and blank lines
+        if '-->' in line or line.startswith(('WEBVTT', 'Kind:', 'Language:')):
+            continue
+        ## drop inline timestamps like <00:00:01.360> and <c>word</c> tags
+        line = re.sub(r'<[^>]+>', '', line).strip()
+        if not line:
+            continue
+        ## rolling captions repeat the previous line, so keep only new text
+        if lines and lines[-1] == line:
+            continue
+        lines.append(line)
+    return ' '.join(lines)
+
 
 def fetch_youtube_transcript(video_id):
     ## use yt-dlp to fetch the transcript
@@ -10,8 +30,8 @@ def fetch_youtube_transcript(video_id):
     transcript_file = f'{video_id}.en.vtt'
     if os.path.exists(transcript_file):
         with open(transcript_file, 'r') as f:
-            transcript = f.read()
-        
+            transcript = clean_vtt(f.read())
+
         return transcript[0:3000]  ## return the first 3000 characters of the transcript
     return None
 
