@@ -1,5 +1,6 @@
 from untrusted_fetch import process_and_store
 import user_profiles
+from injection_screen import md_text, md_url
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 import argparse
@@ -32,10 +33,28 @@ def get_display_name(user_id):
         return user_id
 
 
-def is_direct_message(room_id):
-    """Rooms with two or fewer members are treated as private conversations and never mined for profile facts."""
-    members = matrix_get(f"/rooms/{quote(room_id)}/joined_members")["joined"]
-    return len(members) <= 2
+def direct_room_ids():
+    """Rooms the account itself has marked as direct messages."""
+    me = matrix_get("/account/whoami")["user_id"]
+    try:
+        data = matrix_get(f"/user/{quote(me)}/account_data/m.direct")
+    except requests.HTTPError:
+        return set()
+    return {room for rooms in data.values() for room in rooms}
+
+
+def is_private_room(room_id, direct_rooms):
+    """Anything that isn't clearly community-visible counts as private. Private rooms still feed your own link
+    digest, but are never used for member profiles. If we can't tell, it's private."""
+    if room_id in direct_rooms:
+        return True
+    try:
+        if len(matrix_get(f"/rooms/{quote(room_id)}/joined_members")["joined"]) <= 2:
+            return True
+        join_rule = matrix_get(f"/rooms/{quote(room_id)}/state/m.room.join_rules").get("join_rule")
+    except requests.HTTPError:
+        return True
+    return join_rule not in ("public", "restricted")  ## invite, knock, knock_restricted, private
 
 
 def get_room_name(room_id):
@@ -117,18 +136,18 @@ def write_digest(rows, days, path):
     for category in sorted({r["category"] for r in ok}):
         lines.append(f"## {category}")
         for r in (r for r in ok if r["category"] == category):
-            lines.append(f"- [{r['title'] or r['url']}]({r['url']})")
+            lines.append(f"- [{md_text(r['title'] or r['url'], 120)}](<{md_url(r['url'])}>)")
             for detail in (r["summary"], r["why"]):
                 if detail:
-                    lines.append(f"  - {detail}")
-            lines.append(f"  - shared by: {'; '.join(r['shared_by'])}")
+                    lines.append(f"  - {md_text(detail, 600)}")
+            lines.append(f"  - shared by: {md_text('; '.join(r['shared_by']), 600)}")
         lines.append("")
     if flagged:
         lines += ["## flagged by safety check (not summarized, open with care)"]
-        lines += [f"- {r['url']} [{r['verdict']}]: {'; '.join(r['reasons'][:3])}" for r in flagged] + [""]
+        lines += [f"- <{md_url(r['url'])}> [{r['verdict']}]: {md_text('; '.join(r['reasons'][:3]), 300)}" for r in flagged] + [""]
     if failed:
         lines += ["## couldn't fetch"]
-        lines += [f"- {r['url']}: {r['error']} (shared by {'; '.join(r['shared_by'][:2])})" for r in failed] + [""]
+        lines += [f"- <{md_url(r['url'])}>: {md_text(r['error'], 200)} (shared by {md_text('; '.join(r['shared_by'][:2]), 200)})" for r in failed] + [""]
     with open(path, "w") as f:
         f.write("\n".join(lines))
 
@@ -148,16 +167,21 @@ if __name__ == "__main__":
     db = user_profiles.connect_profiles()
     display_names = {}
     user_messages = {}
+    direct_rooms = direct_room_ids()
     for room_id in matrix_get("/joined_rooms")["joined_rooms"]:
         room_name = get_room_name(room_id)
         events = fetch_room_messages(room_id, since_ms)
         room_items = extract_items(room_name, events)
         for sender in {e["sender"] for e in events} - display_names.keys():
             display_names[sender] = get_display_name(sender)
-        room_messages = user_profiles.record_activity(db, room_name, events, is_direct_message(room_id), display_names)
-        for user, messages in room_messages.items():
-            user_messages.setdefault(user, []).extend(messages)
-        print(f"{room_name}: {len(events)} messages, {len(room_items)} links")
+        private = is_private_room(room_id, direct_rooms)
+        for item in room_items:
+            item["private"] = private
+        if not private:
+            room_messages = user_profiles.record_activity(db, room_name, events, display_names)
+            for user, messages in room_messages.items():
+                user_messages.setdefault(user, []).extend(messages)
+        print(f"{room_name}: {len(events)} messages, {len(room_items)} links{' (private: links only, no profiles)' if private else ''}")
         all_items.extend(room_items)
 
     user_profiles.record_shares(db, all_items)

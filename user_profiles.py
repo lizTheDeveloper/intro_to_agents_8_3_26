@@ -1,6 +1,6 @@
 from util import ask_json
 from untrusted_fetch import connect
-from injection_screen import output_is_clean
+from injection_screen import md_text, md_url, output_is_clean
 from datetime import datetime, timezone
 import json
 import re
@@ -17,6 +17,14 @@ MIN_CHARS_TO_EXTRACT = 80
 MAX_FACTS_PER_CHUNK = 8
 ## facts that would expose contact details are dropped even if the model produced them
 CONTACT_PATTERN = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+|\+?\d[\d\s().-]{8,}\d|\b\d{1,5}\s+\w+\s+(street|st|avenue|ave|road|rd|lane|ln|drive|dr)\b", re.I)
+
+## Words that signal special-category or private topics. This is a backstop for the model's own instructions:
+## a fact that matches is never stored, and the editor agent asks people about such things in general terms instead.
+SENSITIVE_PATTERN = re.compile(
+    r"\b(neurodivergen\w*|autis\w*|adhd|dyslex\w*|queer|gay|lesbian|bisexual|trans|transgender|nonbinary|non-binary|lgbt\w*|sexual\w*|"
+    r"pregnan\w*|disab\w*|depress\w*|anxiety|bipolar|therap\w*|diagnos\w*|medicat\w*|illness|cancer|chronic|mental health|"
+    r"religio\w*|christian|muslim|jewish|atheist|republican|democrat|immigra\w*|visa|undocumented|salary|debt|bankrupt\w*|"
+    r"divorc\w*|abus\w*|assault|addict\w*|sober|arrest\w*|convict\w*|lawsuit|ethnic\w*|racial\w*)\b", re.I)
 
 EXTRACTION_INSTRUCTIONS = f"""These are chat messages written by ONE community member. List facts they state about themselves that could go in a profile of them in a community magazine: what they work on, what they have built or made, skills, interests, ideas they are developing, public background such as their role or studies.
 Rules:
@@ -49,8 +57,8 @@ def strip_reply_fallback(body):
     return "\n".join(line for line in body.splitlines() if not line.startswith("> ")).strip()
 
 
-def record_activity(db, room_name, events, is_direct, display_names):
-    """Update per-user counts and shares; returns {user_id: [messages]} for fact extraction (never from DMs)."""
+def record_activity(db, room_name, events, display_names):
+    """Update per-user counts; returns {user_id: [messages]}. Callers must not pass private rooms or DMs."""
     messages = {}
     for event in events:
         content = event["content"]
@@ -63,24 +71,24 @@ def record_activity(db, room_name, events, is_direct, display_names):
         when = datetime.fromtimestamp(event["origin_server_ts"] / 1000, timezone.utc).isoformat()
         row = db.execute("SELECT rooms FROM users WHERE user_id = ?", (user,)).fetchone()
         rooms = set(json.loads(row["rooms"])) if row else set()
-        if not is_direct:
-            rooms.add(room_name)
+        rooms.add(room_name)
         db.execute("""INSERT INTO users (user_id, display_name, first_seen, last_seen, message_count, rooms) VALUES (?,?,?,?,1,?)
                       ON CONFLICT(user_id) DO UPDATE SET display_name = excluded.display_name,
                         first_seen = MIN(first_seen, excluded.first_seen), last_seen = MAX(last_seen, excluded.last_seen),
                         message_count = message_count + 1, rooms = excluded.rooms""",
                    (user, display_names.get(user, user), when, when, json.dumps(sorted(rooms))))
-        if not is_direct:
-            body = strip_reply_fallback(content.get("body", ""))
-            if body:
-                messages.setdefault(user, []).append({"event_id": event["event_id"], "room": room_name, "time": when, "body": body})
+        body = strip_reply_fallback(content.get("body", ""))
+        if body:
+            messages.setdefault(user, []).append({"event_id": event["event_id"], "room": room_name, "time": when, "body": body})
     db.commit()
     return messages
 
 
 def record_shares(db, items):
-    """items are second_agent link items, one per (message, url) before de-duplication."""
+    """items are second_agent link items, one per (message, url) before de-duplication. Private rooms are never recorded."""
     for item in items:
+        if item.get("private"):
+            continue
         db.execute("INSERT OR IGNORE INTO shares VALUES (?,?,?,?,?,?)",
                    (item["sender"], item["url"], item["room"], item["event_id"], item["time"], item["context"][:300]))
     db.commit()
@@ -117,7 +125,7 @@ def extract_facts(db, user, messages):
                 category = item.get("category") if item.get("category") in FACT_CATEGORIES else "other"
                 ## the quote must really be in what they wrote, which catches hallucinated and injected "facts"
                 source = next((m for m in chunk if normalize(quote) and normalize(quote) in normalize(m["body"])), None)
-                if not fact or source is None or CONTACT_PATTERN.search(fact + " " + quote) or not output_is_clean(fact):
+                if not fact or source is None or CONTACT_PATTERN.search(fact + " " + quote) or SENSITIVE_PATTERN.search(fact + " " + quote) or not output_is_clean(fact, quote):
                     continue
                 cursor = db.execute("INSERT OR IGNORE INTO user_facts (user_id, fact, category, quote, room, event_id, said_at, extracted_at) VALUES (?,?,?,?,?,?,?,?)",
                                     (user, fact, category, quote, source["room"], source["event_id"], source["time"], datetime.now(timezone.utc).isoformat()))
@@ -137,26 +145,34 @@ def set_fact_status(db, fact_id, status):
     db.commit()
 
 
+def forget_user(db, user_id):
+    """Delete everything we hold about one person (their request, or a 'no' to being featured)."""
+    for table in ("user_facts", "shares", "users"):
+        db.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
+    db.commit()
+
+
 def write_profiles(db, path):
     lines = ["# Community profiles (draft)",
              "Facts are what people said in chat, not verified. Nothing here is ready to publish until the person confirms it.", ""]
     for user in db.execute("SELECT * FROM users ORDER BY message_count DESC"):
-        name = user["display_name"] or user["user_id"]
-        lines += [f"## {name} ({user['user_id']})",
-                  f"- {user['message_count']} messages, {user['first_seen'][:10]} to {user['last_seen'][:10]}, rooms: {', '.join(json.loads(user['rooms'])) or 'none'}"]
+        name = md_text(user["display_name"] or user["user_id"], 80)
+        rooms = ", ".join(md_text(r, 80) for r in json.loads(user["rooms"])) or "none"
+        lines += [f"## {name} ({md_text(user['user_id'], 80)})",
+                  f"- {user['message_count']} messages, {user['first_seen'][:10]} to {user['last_seen'][:10]}, rooms: {rooms}"]
         facts = db.execute("SELECT * FROM user_facts WHERE user_id = ? AND status != 'rejected' ORDER BY status DESC, category", (user["user_id"],)).fetchall()
         if facts:
             lines.append("- facts:")
             for f in facts:
-                lines.append(f"  - [{f['status']}] ({f['category']}) {f['fact']}")
-                lines.append(f"    - said in {f['room']} on {f['said_at'][:10]}: \"{f['quote']}\" (event {f['event_id']})")
+                lines.append(f"  - [{f['status']}] ({f['category']}) {md_text(f['fact'])}")
+                lines.append(f"    - said in {md_text(f['room'], 80)} on {f['said_at'][:10]}: \"{md_text(f['quote'])}\" (event {md_text(f['event_id'], 80)})")
         shares = db.execute("""SELECT s.url, s.shared_at, s.room, l.title, l.category, l.verdict FROM shares s LEFT JOIN links l ON l.url = s.url
                                WHERE s.user_id = ? ORDER BY s.shared_at DESC""", (user["user_id"],)).fetchall()
         if shares:
             lines.append("- shared:")
             for s in shares:
                 flag = " [flagged by safety check]" if s["verdict"] in ("suspicious", "unsafe") else ""
-                lines.append(f"  - {(s['title'] or s['url']).replace(chr(10), ' ')} ({s['category'] or 'unknown'}){flag} {s['url']} ({s['room']}, {s['shared_at']})")
+                lines.append(f"  - {md_text(s['title'] or s['url'], 120)} ({md_text(s['category'] or 'unknown', 30)}){flag} <{md_url(s['url'])}> ({md_text(s['room'], 80)}, {s['shared_at'][:10]})")
         lines.append("")
     with open(path, "w") as f:
         f.write("\n".join(lines))

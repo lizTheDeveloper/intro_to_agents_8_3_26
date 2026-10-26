@@ -1,11 +1,14 @@
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from urllib.parse import urlparse
 import ipaddress
 import os
 import socket
+import threading
 import time
 
 import requests
+import urllib3
 
 ## Checks a url before anything fetches it: is it a public address, and is it on a known phishing/malware/spam list?
 
@@ -20,15 +23,44 @@ class FetchError(Exception):
     pass
 
 
-def assert_public_host(host):
-    """SSRF guard: refuse anything that resolves to a private, loopback, or link-local address."""
+def resolve_public(host):
+    """Resolve once and return an address that is safe to connect to. Raises if any answer is non-public.
+    Callers must connect to the returned address, not look the name up again, or DNS rebinding can swap it."""
     try:
-        addresses = {info[4][0] for info in socket.getaddrinfo(host, None)}
+        addresses = [info[4][0] for info in socket.getaddrinfo(host, None)]
     except socket.gaierror:
         raise FetchError(f"can't resolve {host}")
     for address in addresses:
         if not ipaddress.ip_address(address).is_global:
             raise FetchError(f"{host} resolves to a non-public address")
+    return sorted(addresses, key=lambda a: ":" in a)[0]  ## prefer IPv4
+
+
+def assert_public_host(host):
+    resolve_public(host)
+
+
+## urllib3 asks DNS for every connection. For hosts we have already checked, hand it the checked address instead,
+## while the hostname still drives TLS certificate verification and the Host header.
+_pins = threading.local()
+_original_create_connection = urllib3.util.connection.create_connection
+
+
+def _pinned_create_connection(address, *args, **kwargs):
+    host, port = address
+    return _original_create_connection((getattr(_pins, "map", {}).get(host, host), port), *args, **kwargs)
+
+
+urllib3.util.connection.create_connection = _pinned_create_connection
+
+
+@contextmanager
+def pinned(host, address):
+    _pins.map = {host: address}
+    try:
+        yield
+    finally:
+        _pins.map = {}
 
 
 ## ---------- OpenPhish: free community feed of live phishing urls, no key ----------

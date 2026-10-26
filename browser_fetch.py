@@ -1,3 +1,4 @@
+from public_proxy import PublicOnlyProxy
 from url_safety import FetchError, assert_public_host, check_reputation
 from urllib.parse import urlparse
 
@@ -45,8 +46,14 @@ def render_page(url):
             return
         route.continue_()
 
+    ## Chromium never resolves names itself: it hands them to our proxy, which checks and connects in one step
+    proxy = PublicOnlyProxy()
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(
+            headless=True,
+            proxy={"server": f"http://127.0.0.1:{proxy.port}"},
+            args=["--proxy-bypass-list=<-loopback>"],  ## by default Chromium skips the proxy for localhost
+        )
         try:
             context = browser.new_context(
                 accept_downloads=False,
@@ -81,6 +88,7 @@ def render_page(url):
                 raise FetchError(f"browser couldn't load the page: {str(error).splitlines()[0][:150]}")
         finally:
             browser.close()
+            proxy.close()
 
     if len(text.strip()) < 100:
         raise FetchError("page rendered with almost no visible text")

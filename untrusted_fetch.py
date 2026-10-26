@@ -1,7 +1,7 @@
 from util import ask_json
 from tools import fetch_youtube_transcript
-from url_safety import FetchError, assert_public_host, check_reputation
-from injection_screen import HIDDEN_CHARS, screen, output_is_clean
+from url_safety import FetchError, check_reputation, pinned, resolve_public
+from injection_screen import HIDDEN_CHARS, pattern_findings, screen, output_is_clean
 from browser_fetch import render_page
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -47,18 +47,21 @@ def safe_get(url):
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https") or "@" in parsed.netloc or not parsed.hostname:
             raise FetchError("not a plain http(s) url")
-        assert_public_host(parsed.hostname)
-        response = requests.get(url, stream=True, timeout=20, allow_redirects=False, headers={"User-Agent": USER_AGENT})
+        address = resolve_public(parsed.hostname)
+        ## connect to the address we just checked, so a second DNS answer can't redirect us somewhere internal
+        with pinned(parsed.hostname, address):
+            response = requests.get(url, stream=True, timeout=20, allow_redirects=False, headers={"User-Agent": USER_AGENT})
+            body = b""
+            if not response.is_redirect and response.status_code == 200:
+                for chunk in response.iter_content(65536):
+                    body += chunk
+                    if len(body) > MAX_DOWNLOAD_BYTES:
+                        raise FetchError("file too large")
         if response.is_redirect:
             url = urljoin(url, response.headers.get("location", ""))
             continue
         if response.status_code != 200:
             raise FetchError(f"http {response.status_code}")
-        body = b""
-        for chunk in response.iter_content(65536):
-            body += chunk
-            if len(body) > MAX_DOWNLOAD_BYTES:
-                raise FetchError("file too large")
         return url, response.headers.get("content-type", "").split(";")[0].strip().lower(), body
     raise FetchError("too many redirects")
 
@@ -214,12 +217,13 @@ def page_title(raw_text, url):
 
 def post_process(text, context):
     """The only step where a generative model reads page text, so it runs last and only on links already
-    screened as safe. Whatever it writes is checked before it is stored."""
+    screened as safe. Whatever it writes is checked before it is stored. The chat message that shared the link
+    is passed as data next to the page, never spliced into the instructions."""
     result = ask_json(
-        "Someone shared this link in chat" + (f' with the message: "{context[:200]}"' if context else "") + ". "
-        f'Return {{"category": one of {list(CATEGORIES)}, "summary": 2 sentences on what it is, '
+        "Someone shared a link in chat. The chat message and the page are both in the data below. "
+        f'Return {{"category": one of {list(CATEGORIES)}, "summary": 2 sentences on what the page is, '
         '"why": 1 sentence on why it might be interesting}.',
-        text, "{")
+        f"<chat_message>{context[:200]}</chat_message>\n<page>{text}</page>", "{")
     empty = {"summary": "", "why": ""}
     if not isinstance(result, dict):
         return empty
@@ -274,14 +278,20 @@ def fetch_untrusted(url, context=""):
         return row
 
     cleaned = clean_text(raw_text)
-    row["verdict"], row["reasons"] = screen(raw_text)
+    excerpt = cleaned[:MODEL_EXCERPT_CHARS]  ## the safety model and the summarizer both read exactly this
+    row["verdict"], row["reasons"] = screen(raw_text, excerpt)
+    ## the chat message that shared the link is untrusted too, and it reaches the summarizer
+    context_findings = pattern_findings(context)
+    if context_findings:
+        row["reasons"] += [f"chat message: {finding}" for finding in context_findings]
+        row["verdict"] = max(row["verdict"], "suspicious", key=["safe", "suspicious", "unsafe"].index)
     if reputation["verdict"] == "unchecked":
         row["reasons"].append("no blocklist could be reached")
     row["title"] = page_title(cleaned, url)
 
     ## only a safe link gets a model-written category and summary, and that happens last
     if row["verdict"] == "safe":
-        row.update(post_process(cleaned, context))
+        row.update(post_process(excerpt, context))
         if row["kind"] in ("paper", "video"):
             row["category"] = row["kind"]
     ## suspicious and unsafe links are kept as url + reasons only

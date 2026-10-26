@@ -114,13 +114,15 @@ def model_findings(text):
     return result["verdict"], [str(r)[:200] for r in result.get("reasons", [])][:5]
 
 
-def screen(raw_text):
-    """Returns (verdict, reasons) with verdict safe | suspicious | unsafe. Takes the worst layer; fails closed."""
+def screen(raw_text, model_text=None):
+    """Returns (verdict, reasons) with verdict safe | suspicious | unsafe. Takes the worst layer; fails closed.
+    Patterns scan the whole document. The model reads model_text, which callers should make the exact
+    text the downstream summarizer will read, so a payload can't sit in a part only the summarizer sees."""
     ranking = ["safe", "suspicious", "unsafe"]
     reasons = pattern_findings(raw_text)
     verdict = "suspicious" if reasons else "safe"
 
-    modeled = model_findings(raw_text)
+    modeled = model_findings(model_text if model_text is not None else raw_text)
     if modeled is None:
         return "suspicious", reasons + ["safety model gave no usable answer"]
     return max(verdict, modeled[0], key=ranking.index), reasons + modeled[1]
@@ -130,3 +132,13 @@ def output_is_clean(*fields):
     """Check text our own models wrote (titles, summaries) before it is stored or shown."""
     joined = " ".join(fields)
     return not any(p.search(joined) for p in OUTPUT_PATTERNS) and not COMPILED_PATTERNS["exfiltration markup"].search(joined)
+
+
+def md_text(text, limit=300):
+    """Flatten and escape untrusted text before it goes into a markdown file, so it can't add headings, links, or list items."""
+    text = re.sub(r"\s+", " ", str(text)).strip()[:limit]
+    return re.sub(r"([\\`*_{}\[\]<>()#+!|~])", r"\\\1", text)
+
+
+def md_url(url):
+    return re.sub(r"[\s<>]", "", str(url))[:500]
