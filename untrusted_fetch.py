@@ -5,7 +5,7 @@ from injection_screen import HIDDEN_CHARS, pattern_findings, screen, output_is_c
 from browser_fetch import render_page
 from datetime import datetime, timezone
 from html.parser import HTMLParser
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 import json
 import os
 import re
@@ -56,7 +56,16 @@ def host_in(host, domains):
 
 
 def is_meeting_url(url):
-    return host_in(normalized_host(url), MEETING_HOSTS) or any(p in urlparse(url).path.lower() for p in MEETING_PATHS)
+    return host_in(normalized_host(url), MEETING_HOSTS) or any(p in unquote(urlparse(url).path).lower() for p in MEETING_PATHS)
+
+
+def is_unambiguous_url(url):
+    """Python's parser and browsers (WHATWG) disagree about backslashes, control characters, and encoded hosts,
+    so a crafted link can name one host to our checks and another to a fetcher. Those links are refused outright."""
+    if re.search(r"[\\\s\x00-\x1f\x7f]", url):
+        return False
+    parsed = urlparse(url)
+    return parsed.scheme in ("http", "https") and bool(parsed.hostname) and not re.search(r"[@%]", parsed.netloc)
 
 
 class NeedsBrowser(FetchError):
@@ -71,8 +80,8 @@ def safe_get(url):
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https") or "@" in parsed.netloc or not parsed.hostname:
             raise FetchError("not a plain http(s) url")
-        if is_meeting_url(url):
-            raise FetchError("redirects to a meeting or call link, not fetched")
+        if not is_unambiguous_url(url) or is_meeting_url(url):
+            raise FetchError("redirects to a meeting link or an unusual url, not fetched")
         address = resolve_public(parsed.hostname)
         ## connect to the address we just checked, so a second DNS answer can't redirect us somewhere internal
         with pinned(parsed.hostname, address):
@@ -288,6 +297,10 @@ def fetch_untrusted(url, context=""):
     row = {"url": url, "kind": "other", "status": "ok", "error": "", "verdict": "", "reasons": [],
            "trust_level": None, "category": "other", "title": "", "summary": "", "why": ""}
 
+    ## this gate runs before any outside call: blocklists, agentsweb, direct fetch, or the browser
+    if not url.startswith("mxc://") and not is_unambiguous_url(url):
+        row.update(status="failed", error="unusual url, not fetched")
+        return row
     ## meeting links never leave this machine: not to blocklist services, not to any fetcher
     if is_meeting_url(url):
         row.update(status="failed", error="meeting or call link, not fetched")
