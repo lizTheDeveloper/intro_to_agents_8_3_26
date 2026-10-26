@@ -21,7 +21,7 @@ import requests
 ##   rows = process_and_store(items)
 
 AGENTSWEB = "https://agentsweb.org"
-DB_PATH = os.getenv("LINKS_DB", "links.db")
+DB_PATH = os.getenv("COMMUNITY_DB", os.getenv("LINKS_DB", "community.db"))  ## links, people, facts, shares, and outreach all live here
 MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 MAX_TEXT_CHARS = 12000  ## what we keep after cleaning
 MODEL_EXCERPT_CHARS = 6000  ## what the classifier and digester actually read

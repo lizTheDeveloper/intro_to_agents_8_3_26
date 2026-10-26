@@ -2,8 +2,10 @@ from util import ask_json
 from untrusted_fetch import connect
 from injection_screen import md_text, md_url, output_is_clean
 from datetime import datetime, timezone
+import hashlib
 import json
 import re
+import sqlite3
 
 ## Tracks who is in the community, what they shared, and facts they have said about themselves,
 ## as raw material for a magazine/YouTube profile. Everything here is a CLAIM from a chat message:
@@ -48,8 +50,36 @@ def connect_profiles():
             user_id TEXT, url TEXT, room TEXT, event_id TEXT, shared_at TEXT, context TEXT,
             UNIQUE (user_id, url, event_id));
         CREATE TABLE IF NOT EXISTS seen_events (event_id TEXT PRIMARY KEY);
+        -- people who asked to be forgotten, stored as a hash so we keep no readable trace of them
+        CREATE TABLE IF NOT EXISTS forgotten (user_hash TEXT PRIMARY KEY);
+
+        -- Read-only conveniences for you, the operator. They span every person, so agents get a PersonScope instead.
+        CREATE VIEW IF NOT EXISTS user_links AS
+            SELECT s.user_id, u.display_name, s.url, l.title, l.category, l.verdict, l.status, l.summary, l.why, s.room, s.shared_at
+            FROM shares s LEFT JOIN users u ON u.user_id = s.user_id LEFT JOIN links l ON l.url = s.url;
+        CREATE VIEW IF NOT EXISTS user_facts_view AS
+            SELECT f.id, f.user_id, u.display_name, f.fact, f.category, f.status, f.quote, f.room, f.said_at
+            FROM user_facts f LEFT JOIN users u ON u.user_id = f.user_id;
+        CREATE VIEW IF NOT EXISTS profile_summary AS
+            SELECT u.user_id, u.display_name, u.message_count, u.first_seen, u.last_seen, u.rooms,
+                   (SELECT COUNT(*) FROM user_facts f WHERE f.user_id = u.user_id) AS facts,
+                   (SELECT COUNT(*) FROM user_facts f WHERE f.user_id = u.user_id AND f.status = 'confirmed') AS confirmed_facts,
+                   (SELECT COUNT(*) FROM shares s WHERE s.user_id = u.user_id) AS links_shared,
+                   (SELECT status FROM outreach o WHERE o.user_id = u.user_id) AS outreach_status
+            FROM users u;
+        CREATE VIEW IF NOT EXISTS link_sharers AS
+            SELECT l.url, l.title, l.category, l.verdict, l.status, COUNT(DISTINCT s.user_id) AS sharers, MAX(s.shared_at) AS last_shared
+            FROM links l LEFT JOIN shares s ON s.url = l.url GROUP BY l.url;
     """)
     return db
+
+
+def user_hash(user_id):
+    return hashlib.sha256(user_id.encode()).hexdigest()
+
+
+def is_forgotten(db, user_id):
+    return db.execute("SELECT 1 FROM forgotten WHERE user_hash = ?", (user_hash(user_id),)).fetchone() is not None
 
 
 def strip_reply_fallback(body):
@@ -68,6 +98,8 @@ def record_activity(db, room_name, events, display_names):
         if content.get("m.relates_to", {}).get("rel_type") == "m.replace" or content.get("msgtype") == "m.notice":
             continue
         user = event["sender"]
+        if is_forgotten(db, user):
+            continue
         when = datetime.fromtimestamp(event["origin_server_ts"] / 1000, timezone.utc).isoformat()
         row = db.execute("SELECT rooms FROM users WHERE user_id = ?", (user,)).fetchone()
         rooms = set(json.loads(row["rooms"])) if row else set()
@@ -87,7 +119,7 @@ def record_activity(db, room_name, events, display_names):
 def record_shares(db, items):
     """items are second_agent link items, one per (message, url) before de-duplication. Private rooms are never recorded."""
     for item in items:
-        if item.get("private"):
+        if item.get("private") or is_forgotten(db, item["sender"]):
             continue
         db.execute("INSERT OR IGNORE INTO shares VALUES (?,?,?,?,?,?)",
                    (item["sender"], item["url"], item["room"], item["event_id"], item["time"], item["context"][:300]))
@@ -100,6 +132,8 @@ def normalize(text):
 
 def extract_facts(db, user, messages):
     """Ask a model for self-stated facts, then keep only the ones that pass deterministic checks."""
+    if is_forgotten(db, user):
+        return 0
     fresh = [m for m in messages if not db.execute("SELECT 1 FROM seen_events WHERE event_id = ?", (m["event_id"],)).fetchone()]
     if sum(len(m["body"]) for m in fresh) < MIN_CHARS_TO_EXTRACT:
         return 0
@@ -146,9 +180,20 @@ def set_fact_status(db, fact_id, status):
 
 
 def forget_user(db, user_id):
-    """Delete everything we hold about one person (their request, or a 'no' to being featured)."""
+    """Delete everything we hold about one person, and stop collecting about them in future runs."""
     for table in ("user_facts", "shares", "users"):
         db.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
+    try:
+        db.execute("DELETE FROM outreach WHERE user_id = ?", (user_id,))
+    except sqlite3.OperationalError:
+        pass  ## outreach table only exists once the editor agent has run
+    ## links keep a "shared by" list for the digest; take them out of it
+    for row in db.execute("SELECT url, shared_by FROM links").fetchall():
+        sharers = json.loads(row["shared_by"] or "[]")
+        kept = [s for s in sharers if not s.startswith(f"{user_id} in ")]
+        if kept != sharers:
+            db.execute("UPDATE links SET shared_by = ? WHERE url = ?", (json.dumps(kept), row["url"]))
+    db.execute("INSERT OR IGNORE INTO forgotten VALUES (?)", (user_hash(user_id),))
     db.commit()
 
 

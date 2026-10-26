@@ -155,6 +155,7 @@ def write_digest(rows, days, path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--days", type=int, default=7, help="how far back to look")
+    parser.add_argument("--markdown", action="store_true", help="also write matrix_digest.md and user_profiles.md (the database is the main output)")
     parser.add_argument("--out", default="matrix_digest.md")
     parser.add_argument("--profiles-out", default="user_profiles.md")
     args = parser.parse_args()
@@ -187,9 +188,14 @@ if __name__ == "__main__":
     user_profiles.record_shares(db, all_items)
     items = dedupe(all_items)
     rows = process_and_store(items)
-    write_digest(rows, args.days, args.out)
-    print(f"Wrote {len(rows)} links to {args.out}")
+    print(f"Saved {len(rows)} links to the database")
+    if args.markdown:
+        write_digest(rows, args.days, args.out)
+        print(f"Wrote {args.out}")
 
     new_facts = sum(user_profiles.extract_facts(db, user, messages) for user, messages in user_messages.items())
-    user_profiles.write_profiles(db, args.profiles_out)
-    print(f"Noted {new_facts} new facts across {len(user_messages)} people, wrote {args.profiles_out}")
+    print(f"Noted {new_facts} new facts across {len(user_messages)} people")
+    if args.markdown:
+        user_profiles.write_profiles(db, args.profiles_out)
+        print(f"Wrote {args.profiles_out}")
+    print("Query it with: sqlite3 community.db 'SELECT * FROM profile_summary'")

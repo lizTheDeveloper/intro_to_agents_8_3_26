@@ -46,9 +46,24 @@ _pins = threading.local()
 _original_create_connection = urllib3.util.connection.create_connection
 
 
+def _pin_key(host):
+    """Normalize the way urllib3 sees the host: lowercase, IDNA-encoded, no brackets or trailing dot."""
+    host = host.strip("[]").rstrip(".").lower()
+    try:
+        return host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return host
+
+
 def _pinned_create_connection(address, *args, **kwargs):
     host, port = address
-    return _original_create_connection((getattr(_pins, "map", {}).get(host, host), port), *args, **kwargs)
+    pins = getattr(_pins, "map", None)
+    if pins:
+        ## inside a pinned request, connecting anywhere we didn't check is refused rather than looked up again
+        if _pin_key(host) not in pins:
+            raise OSError(f"refusing unpinned connection to {host}")
+        host = pins[_pin_key(host)]
+    return _original_create_connection((host, port), *args, **kwargs)
 
 
 urllib3.util.connection.create_connection = _pinned_create_connection
@@ -56,11 +71,11 @@ urllib3.util.connection.create_connection = _pinned_create_connection
 
 @contextmanager
 def pinned(host, address):
-    _pins.map = {host: address}
+    _pins.map = {_pin_key(host): address}
     try:
         yield
     finally:
-        _pins.map = {}
+        _pins.map = None
 
 
 ## ---------- OpenPhish: free community feed of live phishing urls, no key ----------

@@ -199,6 +199,4 @@ if __name__ == "__main__":
             print(f"Sent {send_approved(db, token)} messages")
     elif args.command == "forget":
         forget_user(db, args.user_id)
-        db.execute("DELETE FROM outreach WHERE user_id = ?", (args.user_id,))
-        db.commit()
         print(f"Deleted everything held about {args.user_id}")

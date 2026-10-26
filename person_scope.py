@@ -29,7 +29,8 @@ class PersonScope:
     @staticmethod
     def user_ids(db):
         """The orchestrator's list of who to process: ids only, no content."""
-        return [r["user_id"] for r in db.execute("SELECT user_id FROM users ORDER BY message_count DESC")]
+        from user_profiles import is_forgotten
+        return [r["user_id"] for r in db.execute("SELECT user_id FROM users ORDER BY message_count DESC") if not is_forgotten(db, r["user_id"])]
 
     def facts(self):
         return [f for f in self._facts if f["id"] not in self._deleted_fact_ids]
