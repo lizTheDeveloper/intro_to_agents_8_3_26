@@ -34,6 +34,9 @@ USER_AGENT = "Mozilla/5.0 (compatible; link-digest-bot)"
 
 ## these need a login, so they would 403 anyway, and their URLs shouldn't go to a shared public cache
 PRIVATE_DOC_HOSTS = ("docs.google.com", "drive.google.com", "notion.so", "notion.site", "sharepoint.com", "dropbox.com", "figma.com")
+## meeting and call links are invitations, not content, and must not end up in a shared public cache
+MEETING_HOSTS = ("meet.google.com", "zoom.us", "teams.microsoft.com", "teams.live.com", "whereby.com", "meet.jit.si")
+MEETING_PATHS = ("/call/", "/meeting/", "/j/")
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
 CATEGORIES = ("paper", "project", "document", "idea", "video", "tool", "article", "other")
 
@@ -150,6 +153,8 @@ def fetch_text(url):
 
     if parsed.scheme == "mxc":
         raise FetchError("matrix upload, needs an authenticated download")
+    if any(host == h or host.endswith("." + h) for h in MEETING_HOSTS) or any(p in path for p in MEETING_PATHS):
+        raise FetchError("meeting or call link, not fetched")
 
     youtube_id = None
     if host in ("youtu.be", "www.youtu.be"):
@@ -308,8 +313,10 @@ def process_and_store(items):
     for item in items:
         url = item["url"]
         existing = db.execute("SELECT * FROM links WHERE url = ?", (url,)).fetchone()
-        ## already digested: just record who else shared it. Failed ones get another try.
-        if existing and existing["status"] != "failed":
+        ## already digested: just record who else shared it. Failed ones, and ones the safety model
+        ## couldn't judge (no key, outage), get another try.
+        unjudged = existing and "safety model gave no usable answer" in (existing["reasons"] or "")
+        if existing and existing["status"] != "failed" and not unjudged:
             row = row_to_dict(existing)
             row["shared_by"] = sorted(set(row["shared_by"]) | set(item.get("shared_by", [])))
         else:
