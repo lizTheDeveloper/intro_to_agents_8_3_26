@@ -1,4 +1,5 @@
-from util import ask_json
+from util import SUMMARY_MODEL, ask_json
+import os
 import base64
 import binascii
 import re
@@ -12,7 +13,10 @@ import unicodedata
 ## OWASP is explicit that pattern matching is "not a security boundary" and that a trained
 ## classifier catches what regex misses, so layer 2 only ever raises the bar for review.
 
-CLASSIFIER_MODEL = "openai/gpt-oss-safeguard-20b"
+CLASSIFIER_MODEL = os.getenv("CLASSIFIER_MODEL", "openai/gpt-oss-safeguard-20b")
+## gpt-oss-safeguard is trained to read its policy from the system message. When one local model does both
+## screening and summaries, the policy goes after the page instead, so both calls share the page's tokens.
+POLICY_IN_SYSTEM = CLASSIFIER_MODEL != SUMMARY_MODEL
 
 ## zero-width, bidi-override, and unicode "tag" characters are used to hide text from humans
 HIDDEN_CHARS = re.compile("[​-‏‪-‮⁠-⁤﻿\U000e0000-\U000e007f]")
@@ -118,7 +122,8 @@ def pattern_findings(raw_text):
 
 def model_findings(text):
     """Returns (verdict, reasons), or None if the classifier gave no usable answer."""
-    result = ask_json("Screen this content.", normalize(text), "{", model=CLASSIFIER_MODEL, system=SAFEGUARD_POLICY)
+    ## the exact text the summarizer will read, byte for byte, so a prefix cache can share it between the two calls
+    result = ask_json(SAFEGUARD_POLICY, text, "{", model=CLASSIFIER_MODEL, instructions_in_system=POLICY_IN_SYSTEM)
     if not isinstance(result, dict) or result.get("verdict") not in ("safe", "suspicious", "unsafe"):
         return None
     return result["verdict"], [str(r)[:200] for r in result.get("reasons", [])][:5]

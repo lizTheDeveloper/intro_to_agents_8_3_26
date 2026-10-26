@@ -256,10 +256,10 @@ def post_process(text, context):
     screened as safe. Whatever it writes is checked before it is stored. The chat message that shared the link
     is passed as data next to the page, never spliced into the instructions."""
     result = ask_json(
-        "Someone shared a link in chat. The chat message and the page are both in the data below. "
+        "Someone shared a link in chat. The first data block is the page; any second block is the chat message that shared it. "
         f'Return {{"category": one of {list(CATEGORIES)}, "summary": 2 sentences on what the page is, '
         '"why": 1 sentence on why it might be interesting}.',
-        f"<chat_message>{context[:200]}</chat_message>\n<page>{text}</page>", "{")
+        text, "{", extra_data=("Chat message that shared the link", context[:200]) if context else None)
     empty = {"summary": "", "why": ""}
     if not isinstance(result, dict):
         return empty
