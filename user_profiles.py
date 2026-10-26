@@ -3,6 +3,9 @@ from untrusted_fetch import connect
 from injection_screen import md_text, md_url, output_is_clean
 from datetime import datetime, timezone
 import hashlib
+import hmac
+import os
+import secrets
 import json
 import re
 import sqlite3
@@ -74,8 +77,26 @@ def connect_profiles():
     return db
 
 
+## Matrix ids are guessable, so a plain hash of one can be matched by anyone holding the database.
+## The key lives in a separate file (or FORGET_SECRET), so the database alone can't say who was forgotten.
+FORGET_SECRET_PATH = os.getenv("FORGET_SECRET_PATH", ".forget_secret")
+## reports generated from the database; forget deletes them so no stale copy outlives the person's data
+GENERATED_REPORTS = ("user_profiles.md", "matrix_digest.md", "outreach_drafts.md")
+
+
+def forget_key():
+    if os.getenv("FORGET_SECRET"):
+        return os.getenv("FORGET_SECRET").encode()
+    if not os.path.exists(FORGET_SECRET_PATH):
+        with open(FORGET_SECRET_PATH, "w") as f:
+            f.write(secrets.token_hex(32))
+        os.chmod(FORGET_SECRET_PATH, 0o600)
+    with open(FORGET_SECRET_PATH) as f:
+        return f.read().strip().encode()
+
+
 def user_hash(user_id):
-    return hashlib.sha256(user_id.encode()).hexdigest()
+    return hmac.new(forget_key(), user_id.encode(), hashlib.sha256).hexdigest()
 
 
 def is_forgotten(db, user_id):
@@ -180,7 +201,8 @@ def set_fact_status(db, fact_id, status):
 
 
 def forget_user(db, user_id):
-    """Delete everything we hold about one person, and stop collecting about them in future runs."""
+    """Delete everything we hold about one person, and stop collecting about them in future runs.
+    Generated markdown reports are deleted too (rebuild them with --markdown); copies saved under other names aren't tracked."""
     for table in ("user_facts", "shares", "users"):
         db.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
     try:
@@ -195,6 +217,9 @@ def forget_user(db, user_id):
             db.execute("UPDATE links SET shared_by = ? WHERE url = ?", (json.dumps(kept), row["url"]))
     db.execute("INSERT OR IGNORE INTO forgotten VALUES (?)", (user_hash(user_id),))
     db.commit()
+    for report in GENERATED_REPORTS:
+        if os.path.exists(report):
+            os.remove(report)
 
 
 def write_profiles(db, path):

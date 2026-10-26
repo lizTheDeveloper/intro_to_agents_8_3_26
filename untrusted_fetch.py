@@ -22,6 +22,9 @@ import requests
 
 AGENTSWEB = "https://agentsweb.org"
 DB_PATH = os.getenv("COMMUNITY_DB", os.getenv("LINKS_DB", "community.db"))  ## links, people, facts, shares, and outreach all live here
+## this file used to be called links.db; move it rather than leave old personal data behind in a file nothing reads
+if DB_PATH == "community.db" and os.path.exists("links.db") and not os.path.exists(DB_PATH):
+    os.rename("links.db", DB_PATH)
 MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 MAX_TEXT_CHARS = 12000  ## what we keep after cleaning
 MODEL_EXCERPT_CHARS = 6000  ## what the classifier and digester actually read
