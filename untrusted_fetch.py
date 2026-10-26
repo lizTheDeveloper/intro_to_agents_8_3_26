@@ -12,6 +12,7 @@ import re
 import sqlite3
 import subprocess
 import tempfile
+import unicodedata
 
 import requests
 
@@ -234,7 +235,9 @@ def fetch_text(url):
 ## ---------- cleaning ----------
 
 def clean_text(text):
-    text = HIDDEN_CHARS.sub("", text)
+    """The one copy of the page that both the safety model and the summarizer read. NFKC folds fullwidth letters
+    and ligatures, so an injection spelled in look-alike characters reads the same to both models."""
+    text = unicodedata.normalize("NFKC", HIDDEN_CHARS.sub("", text))
     text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
     text = re.sub(r"[^\S\n]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
