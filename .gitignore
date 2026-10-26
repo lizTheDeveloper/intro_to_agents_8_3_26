@@ -4,3 +4,4 @@ __pycache__/
 links.db
 *.vtt
 .openphish_feed.txt
+user_profiles.md

@@ -1,4 +1,5 @@
 from untrusted_fetch import process_and_store
+import user_profiles
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 import argparse
@@ -22,6 +23,19 @@ def matrix_get(path, params=None):
     response = requests.get(f"{HOMESERVER}/_matrix/client/v3{path}", headers=HEADERS, params=params)
     response.raise_for_status()
     return response.json()
+
+
+def get_display_name(user_id):
+    try:
+        return matrix_get(f"/profile/{quote(user_id)}/displayname").get("displayname") or user_id
+    except requests.HTTPError:
+        return user_id
+
+
+def is_direct_message(room_id):
+    """Rooms with two or fewer members are treated as private conversations and never mined for profile facts."""
+    members = matrix_get(f"/rooms/{quote(room_id)}/joined_members")["joined"]
+    return len(members) <= 2
 
 
 def get_room_name(room_id):
@@ -64,6 +78,7 @@ def extract_items(room_name, events):
             if link.startswith(IGNORED_PREFIXES):
                 continue
             items.append({
+                "event_id": event["event_id"],
                 "url": link,
                 "room": room_name,
                 "sender": event["sender"],
@@ -73,6 +88,7 @@ def extract_items(room_name, events):
         ## files people uploaded directly (pdfs, docs, images)
         if content.get("msgtype") in ("m.file", "m.image", "m.video") and content.get("url"):
             items.append({
+                "event_id": event["event_id"],
                 "url": content["url"],  ## mxc:// url, needs the homeserver to download
                 "room": room_name,
                 "sender": event["sender"],
@@ -121,6 +137,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--days", type=int, default=7, help="how far back to look")
     parser.add_argument("--out", default="matrix_digest.md")
+    parser.add_argument("--profiles-out", default="user_profiles.md")
     args = parser.parse_args()
 
     if not os.getenv("MATRIX_TOKEN"):
@@ -128,14 +145,27 @@ if __name__ == "__main__":
 
     since_ms = int((datetime.now(timezone.utc) - timedelta(days=args.days)).timestamp() * 1000)
     all_items = []
+    db = user_profiles.connect_profiles()
+    display_names = {}
+    user_messages = {}
     for room_id in matrix_get("/joined_rooms")["joined_rooms"]:
         room_name = get_room_name(room_id)
         events = fetch_room_messages(room_id, since_ms)
         room_items = extract_items(room_name, events)
+        for sender in {e["sender"] for e in events} - display_names.keys():
+            display_names[sender] = get_display_name(sender)
+        room_messages = user_profiles.record_activity(db, room_name, events, is_direct_message(room_id), display_names)
+        for user, messages in room_messages.items():
+            user_messages.setdefault(user, []).extend(messages)
         print(f"{room_name}: {len(events)} messages, {len(room_items)} links")
         all_items.extend(room_items)
 
+    user_profiles.record_shares(db, all_items)
     items = dedupe(all_items)
     rows = process_and_store(items)
     write_digest(rows, args.days, args.out)
     print(f"Wrote {len(rows)} links to {args.out}")
+
+    new_facts = sum(user_profiles.extract_facts(db, user, messages) for user, messages in user_messages.items())
+    user_profiles.write_profiles(db, args.profiles_out)
+    print(f"Noted {new_facts} new facts across {len(user_messages)} people, wrote {args.profiles_out}")
