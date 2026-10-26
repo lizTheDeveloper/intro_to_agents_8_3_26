@@ -185,11 +185,10 @@ if __name__ == "__main__":
         events = fetch_room_messages(args.admin_room, since_ms, as_admin=True)
         ## links only: this read skips the room's history setting, so nothing about people is kept
         items = extract_items(room_name, events)
-        for item in items:
-            item["private"] = True
-            item["sender"] = "a member"  ## who posted it isn't kept
+        ## only the URL survives: no message text (so nothing goes to a model), no poster, no room, no date
+        items = [{"url": item["url"], "context": "", "shared_by": ["admin read"], "private": True} for item in items]
         print(f"{room_name}: {len(events)} messages, {len(items)} links (admin read, links only)", flush=True)
-        rows = process_and_store(dedupe(items))
+        rows = process_and_store({item["url"]: item for item in items}.values())
         print(f"Saved {len(rows)} links to the database")
         if args.markdown:
             write_digest(rows, args.days, args.out)
