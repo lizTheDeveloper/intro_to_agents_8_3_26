@@ -1,0 +1,6 @@
+.env
+matrix_digest.md
+__pycache__/
+links.db
+*.vtt
+.openphish_feed.txt
