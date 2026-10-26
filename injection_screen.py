@@ -115,7 +115,8 @@ def model_findings(text):
 
 
 def screen(raw_text, model_text=None):
-    """Returns (verdict, reasons) with verdict safe | suspicious | unsafe. Takes the worst layer; fails closed.
+    """Returns (verdict, reasons, judged) with verdict safe | suspicious | unsafe. Takes the worst layer; fails closed.
+    judged is False when the safety model gave no answer, so callers can retry later.
     Patterns scan the whole document. The model reads model_text, which callers should make the exact
     text the downstream summarizer will read, so a payload can't sit in a part only the summarizer sees."""
     ranking = ["safe", "suspicious", "unsafe"]
@@ -124,8 +125,8 @@ def screen(raw_text, model_text=None):
 
     modeled = model_findings(model_text if model_text is not None else raw_text)
     if modeled is None:
-        return "suspicious", reasons + ["safety model gave no usable answer"]
-    return max(verdict, modeled[0], key=ranking.index), reasons + modeled[1]
+        return "suspicious", reasons + ["safety model gave no usable answer"], False
+    return max(verdict, modeled[0], key=ranking.index), reasons + modeled[1], True
 
 
 def output_is_clean(*fields):

@@ -35,10 +35,28 @@ USER_AGENT = "Mozilla/5.0 (compatible; link-digest-bot)"
 ## these need a login, so they would 403 anyway, and their URLs shouldn't go to a shared public cache
 PRIVATE_DOC_HOSTS = ("docs.google.com", "drive.google.com", "notion.so", "notion.site", "sharepoint.com", "dropbox.com", "figma.com")
 ## meeting and call links are invitations, not content, and must not end up in a shared public cache
-MEETING_HOSTS = ("meet.google.com", "zoom.us", "teams.microsoft.com", "teams.live.com", "whereby.com", "meet.jit.si")
-MEETING_PATHS = ("/call/", "/meeting/", "/j/")
+MEETING_HOSTS = ("meet.google.com", "zoom.us", "zoom.com", "zoomgov.com", "teams.microsoft.com", "teams.live.com", "whereby.com", "meet.jit.si")
+MEETING_PATHS = ("/call/", "/meeting/", "/j/", "/meet/")
+## short links hide where they go, so they never go to the shared cache; safe_get follows them hop by hop instead
+SHORTENER_HOSTS = ("bit.ly", "t.co", "tinyurl.com", "g.co", "goo.gl", "ow.ly", "buff.ly", "is.gd", "s.id", "rb.gy", "cutt.ly", "shorturl.at", "lnkd.in")
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
 CATEGORIES = ("paper", "project", "document", "idea", "video", "tool", "article", "other")
+
+
+def normalized_host(url):
+    host = (urlparse(url).hostname or "").rstrip(".").lower()
+    try:
+        return host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return host
+
+
+def host_in(host, domains):
+    return any(host == d or host.endswith("." + d) for d in domains)
+
+
+def is_meeting_url(url):
+    return host_in(normalized_host(url), MEETING_HOSTS) or any(p in urlparse(url).path.lower() for p in MEETING_PATHS)
 
 
 class NeedsBrowser(FetchError):
@@ -53,6 +71,8 @@ def safe_get(url):
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https") or "@" in parsed.netloc or not parsed.hostname:
             raise FetchError("not a plain http(s) url")
+        if is_meeting_url(url):
+            raise FetchError("redirects to a meeting or call link, not fetched")
         address = resolve_public(parsed.hostname)
         ## connect to the address we just checked, so a second DNS answer can't redirect us somewhere internal
         with pinned(parsed.hostname, address):
@@ -153,8 +173,7 @@ def fetch_text(url):
 
     if parsed.scheme == "mxc":
         raise FetchError("matrix upload, needs an authenticated download")
-    if any(host == h or host.endswith("." + h) for h in MEETING_HOSTS) or any(p in path for p in MEETING_PATHS):
-        raise FetchError("meeting or call link, not fetched")
+    host = normalized_host(url)
 
     youtube_id = None
     if host in ("youtu.be", "www.youtu.be"):
@@ -186,7 +205,7 @@ def fetch_text(url):
 
     if path.endswith(IMAGE_EXTENSIONS):
         return "image", "[image, not analyzed]", None
-    if path.endswith(".pdf") or any(host.endswith(h) for h in PRIVATE_DOC_HOSTS):
+    if path.endswith(".pdf") or host_in(host, PRIVATE_DOC_HOSTS) or host_in(host, SHORTENER_HOSTS):
         kind, text = fetch_direct(url)
         return kind, text, None
 
@@ -269,6 +288,11 @@ def fetch_untrusted(url, context=""):
     row = {"url": url, "kind": "other", "status": "ok", "error": "", "verdict": "", "reasons": [],
            "trust_level": None, "category": "other", "title": "", "summary": "", "why": ""}
 
+    ## meeting links never leave this machine: not to blocklist services, not to any fetcher
+    if is_meeting_url(url):
+        row.update(status="failed", error="meeting or call link, not fetched")
+        return row
+
     ## nothing is fetched, by any fetcher, until the url has passed the blocklists
     reputation = check_reputation(url)
     if reputation["verdict"] == "listed":
@@ -287,7 +311,9 @@ def fetch_untrusted(url, context=""):
 
     cleaned = clean_text(raw_text)
     excerpt = cleaned[:MODEL_EXCERPT_CHARS]  ## the safety model and the summarizer both read exactly this
-    row["verdict"], row["reasons"] = screen(raw_text, excerpt)
+    row["verdict"], row["reasons"], judged = screen(raw_text, excerpt)
+    if not judged:
+        row["status"] = "unjudged"  ## the safety model didn't answer; retried next run
     ## the chat message that shared the link is untrusted too, and it reaches the summarizer
     context_findings = pattern_findings(context)
     if context_findings:
@@ -313,15 +339,17 @@ def process_and_store(items):
     for item in items:
         url = item["url"]
         existing = db.execute("SELECT * FROM links WHERE url = ?", (url,)).fetchone()
-        ## already digested: just record who else shared it. Failed ones, and ones the safety model
-        ## couldn't judge (no key, outage), get another try.
-        unjudged = existing and "safety model gave no usable answer" in (existing["reasons"] or "")
-        if existing and existing["status"] != "failed" and not unjudged:
+        ## already digested: just record who else shared it. Failed and unjudged links get another try,
+        ## but a link already judged unsafe is never re-screened.
+        retry = existing and existing["status"] in ("failed", "unjudged") and existing["verdict"] != "unsafe"
+        if existing and not retry:
             row = row_to_dict(existing)
             row["shared_by"] = sorted(set(row["shared_by"]) | set(item.get("shared_by", [])))
         else:
             row = fetch_untrusted(url, item.get("context", ""))
-            row["shared_by"] = item.get("shared_by", [])
+            row["shared_by"] = sorted(set(item.get("shared_by", [])) | set(row_to_dict(existing)["shared_by"] if existing else []))
+            ## no verdict is carried over: failed links never had one, an unjudged link's "suspicious" is only a
+            ## placeholder, and only our own code (not page or model text) can mark a link unjudged
             print(f"  {row['status']:10} {row['verdict'] or '-':10} {url[:90]}")
         db.execute(
             "INSERT OR REPLACE INTO links VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
