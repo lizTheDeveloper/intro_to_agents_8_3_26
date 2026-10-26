@@ -155,6 +155,8 @@ def write_digest(rows, days, path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--days", type=int, default=7, help="how far back to look")
+    parser.add_argument("--rooms", nargs="*", help="only read rooms whose name contains one of these (case-insensitive)")
+    parser.add_argument("--no-profiles", action="store_true", help="gather links only; don't track people or extract facts")
     parser.add_argument("--markdown", action="store_true", help="also write matrix_digest.md and user_profiles.md (the database is the main output)")
     parser.add_argument("--out", default="matrix_digest.md")
     parser.add_argument("--profiles-out", default="user_profiles.md")
@@ -171,6 +173,8 @@ if __name__ == "__main__":
     direct_rooms = direct_room_ids()
     for room_id in matrix_get("/joined_rooms")["joined_rooms"]:
         room_name = get_room_name(room_id)
+        if args.rooms and not any(wanted.lower() in room_name.lower() for wanted in args.rooms):
+            continue
         events = fetch_room_messages(room_id, since_ms)
         room_items = extract_items(room_name, events)
         for sender in {e["sender"] for e in events} - display_names.keys():
@@ -178,14 +182,15 @@ if __name__ == "__main__":
         private = is_private_room(room_id, direct_rooms)
         for item in room_items:
             item["private"] = private
-        if not private:
+        if not private and not args.no_profiles:
             room_messages = user_profiles.record_activity(db, room_name, events, display_names)
             for user, messages in room_messages.items():
                 user_messages.setdefault(user, []).extend(messages)
         print(f"{room_name}: {len(events)} messages, {len(room_items)} links{' (private: links only, no profiles)' if private else ''}")
         all_items.extend(room_items)
 
-    user_profiles.record_shares(db, all_items)
+    if not args.no_profiles:
+        user_profiles.record_shares(db, all_items)
     items = dedupe(all_items)
     rows = process_and_store(items)
     print(f"Saved {len(rows)} links to the database")
@@ -193,6 +198,8 @@ if __name__ == "__main__":
         write_digest(rows, args.days, args.out)
         print(f"Wrote {args.out}")
 
+    if args.no_profiles:
+        raise SystemExit(0)
     new_facts = sum(user_profiles.extract_facts(db, user, messages) for user, messages in user_messages.items())
     print(f"Noted {new_facts} new facts across {len(user_messages)} people")
     if args.markdown:

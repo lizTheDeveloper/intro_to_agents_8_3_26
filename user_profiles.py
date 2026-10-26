@@ -1,5 +1,5 @@
 from util import ask_json
-from untrusted_fetch import connect
+from untrusted_fetch import connect, DB_PATH
 from injection_screen import md_text, md_url, output_is_clean
 from datetime import datetime, timezone
 import hashlib
@@ -78,29 +78,52 @@ def connect_profiles():
 
 
 ## Matrix ids are guessable, so a plain hash of one can be matched by anyone holding the database.
-## The key lives in a separate file (or FORGET_SECRET), so the database alone can't say who was forgotten.
-FORGET_SECRET_PATH = os.getenv("FORGET_SECRET_PATH", ".forget_secret")
+## The key lives in a file next to the database (or FORGET_SECRET), so the database alone can't say who was forgotten.
+FORGET_SECRET_PATH = os.getenv("FORGET_SECRET_PATH", os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), ".forget_secret"))
 ## reports generated from the database; forget deletes them so no stale copy outlives the person's data
 GENERATED_REPORTS = ("user_profiles.md", "matrix_digest.md", "outreach_drafts.md")
 
 
-def forget_key():
+def forget_key(db):
+    """The database stores a check value for the key, so a lost or swapped key is caught instead of
+    silently replaced. A new key would make every marker unmatchable and forgotten people would come back."""
+    db.execute("CREATE TABLE IF NOT EXISTS forget_meta (key_check TEXT)")
+    stored = db.execute("SELECT key_check FROM forget_meta").fetchone()
     if os.getenv("FORGET_SECRET"):
-        return os.getenv("FORGET_SECRET").encode()
-    if not os.path.exists(FORGET_SECRET_PATH):
+        key = os.getenv("FORGET_SECRET").encode()
+    elif os.path.exists(FORGET_SECRET_PATH):
+        with open(FORGET_SECRET_PATH) as f:
+            key = f.read().strip().encode()
+    elif stored:
+        raise RuntimeError(f"{FORGET_SECRET_PATH} is missing but this database was set up with a forget key. Restore it (or set FORGET_SECRET).")
+    else:
+        key = secrets.token_hex(32).encode()
         with open(FORGET_SECRET_PATH, "w") as f:
-            f.write(secrets.token_hex(32))
+            f.write(key.decode())
         os.chmod(FORGET_SECRET_PATH, 0o600)
-    with open(FORGET_SECRET_PATH) as f:
-        return f.read().strip().encode()
+    check = hmac.new(key, b"forget-key-check", hashlib.sha256).hexdigest()
+    if stored is None:
+        db.execute("INSERT INTO forget_meta VALUES (?)", (check,))
+        db.commit()
+    elif stored["key_check"] != check:
+        raise RuntimeError("The forget key doesn't match the one this database was set up with.")
+    return key
 
 
-def user_hash(user_id):
-    return hmac.new(forget_key(), user_id.encode(), hashlib.sha256).hexdigest()
+def user_hash(db, user_id):
+    return hmac.new(forget_key(db), user_id.encode(), hashlib.sha256).hexdigest()
 
 
 def is_forgotten(db, user_id):
-    return db.execute("SELECT 1 FROM forgotten WHERE user_hash = ?", (user_hash(user_id),)).fetchone() is not None
+    if db.execute("SELECT 1 FROM forgotten WHERE user_hash = ?", (user_hash(db, user_id),)).fetchone():
+        return True
+    ## markers written before the keyed hash: still honour them, and upgrade them in place
+    legacy = hashlib.sha256(user_id.encode()).hexdigest()
+    if db.execute("SELECT 1 FROM forgotten WHERE user_hash = ?", (legacy,)).fetchone():
+        db.execute("UPDATE forgotten SET user_hash = ? WHERE user_hash = ?", (user_hash(db, user_id), legacy))
+        db.commit()
+        return True
+    return False
 
 
 def strip_reply_fallback(body):
@@ -215,7 +238,7 @@ def forget_user(db, user_id):
         kept = [s for s in sharers if not s.startswith(f"{user_id} in ")]
         if kept != sharers:
             db.execute("UPDATE links SET shared_by = ? WHERE url = ?", (json.dumps(kept), row["url"]))
-    db.execute("INSERT OR IGNORE INTO forgotten VALUES (?)", (user_hash(user_id),))
+    db.execute("INSERT OR IGNORE INTO forgotten VALUES (?)", (user_hash(db, user_id),))
     db.commit()
     for report in GENERATED_REPORTS:
         if os.path.exists(report):
