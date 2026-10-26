@@ -20,10 +20,15 @@ URL_PATTERN = re.compile(r"https?://[^\s<>\"')\]]+")
 IGNORED_PREFIXES = ("https://matrix.to/", "https://matrix.org/_matrix/")
 
 
-def matrix_get(path, params=None):
-    response = requests.get(f"{HOMESERVER}/_matrix/client/v3{path}", headers=HEADERS, params=params)
+def matrix_get(path, params=None, headers=None, api="/_matrix/client/v3"):
+    response = requests.get(f"{HOMESERVER}{api}{path}", headers=headers or HEADERS, params=params, timeout=60)
     response.raise_for_status()
     return response.json()
+
+
+def admin_get(path, params=None):
+    """Synapse admin API, with a token that is only ever passed in for one command (never stored in .env)."""
+    return matrix_get(path, params, headers={"Authorization": f"Bearer {os.environ['MATRIX_ADMIN_TOKEN']}"}, api="/_synapse/admin/v1")
 
 
 def get_display_name(user_id):
@@ -64,15 +69,19 @@ def get_room_name(room_id):
         return room_id  ## unnamed rooms (DMs, etc.)
 
 
-def fetch_room_messages(room_id, since_ms):
-    """Page backwards through a room until we pass the cutoff."""
+def fetch_room_messages(room_id, since_ms, as_admin=False):
+    """Page backwards through a room until we pass the cutoff. as_admin reads through the Synapse admin API,
+    which needs no membership and ignores the room's history visibility."""
     events = []
     page_token = None
     while True:
         params = {"dir": "b", "limit": 100}
         if page_token:
             params["from"] = page_token
-        page = matrix_get(f"/rooms/{quote(room_id)}/messages", params)
+        if as_admin:
+            page = admin_get(f"/rooms/{quote(room_id)}/messages", params)
+        else:
+            page = matrix_get(f"/rooms/{quote(room_id)}/messages", params)
         for event in page.get("chunk", []):
             if event["origin_server_ts"] < since_ms:
                 return events
@@ -157,6 +166,8 @@ if __name__ == "__main__":
     parser.add_argument("--days", type=int, default=7, help="how far back to look")
     parser.add_argument("--rooms", nargs="*", help="only read rooms whose name contains one of these (case-insensitive)")
     parser.add_argument("--no-profiles", action="store_true", help="gather links only; don't track people or extract facts")
+    parser.add_argument("--admin-room", help="read this one room id's history through the admin API (needs MATRIX_ADMIN_TOKEN "
+                        "for this command only). Always links only: no people, no facts.")
     parser.add_argument("--markdown", action="store_true", help="also write matrix_digest.md and user_profiles.md (the database is the main output)")
     parser.add_argument("--out", default="matrix_digest.md")
     parser.add_argument("--profiles-out", default="user_profiles.md")
@@ -166,6 +177,25 @@ if __name__ == "__main__":
         raise SystemExit("Set MATRIX_TOKEN (and MATRIX_HOMESERVER if not matrix.org) in your .env")
 
     since_ms = int((datetime.now(timezone.utc) - timedelta(days=args.days)).timestamp() * 1000)
+
+    if args.admin_room:
+        if not os.getenv("MATRIX_ADMIN_TOKEN"):
+            raise SystemExit("--admin-room needs MATRIX_ADMIN_TOKEN set for this command")
+        room_name = admin_get(f"/rooms/{quote(args.admin_room)}").get("name") or args.admin_room
+        events = fetch_room_messages(args.admin_room, since_ms, as_admin=True)
+        ## links only: this read skips the room's history setting, so nothing about people is kept
+        items = extract_items(room_name, events)
+        for item in items:
+            item["private"] = True
+            item["sender"] = "a member"  ## who posted it isn't kept
+        print(f"{room_name}: {len(events)} messages, {len(items)} links (admin read, links only)", flush=True)
+        rows = process_and_store(dedupe(items))
+        print(f"Saved {len(rows)} links to the database")
+        if args.markdown:
+            write_digest(rows, args.days, args.out)
+            print(f"Wrote {args.out}")
+        raise SystemExit(0)
+
     all_items = []
     db = user_profiles.connect_profiles()
     display_names = {}
