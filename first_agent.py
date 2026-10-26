@@ -39,12 +39,16 @@ while not done:
             "tool_call_id": tool_call_id,
             "content": f"Calling tool {tool_name} with arguments {tool_args}"
         })
+        
+        
         if tool_name == 'fetch_youtube_transcript':
             tool_result = fetch_youtube_transcript(tool_args['video_id'])
         elif tool_name == 'get_arxiv_paper':
             tool_result = get_arxiv_paper(tool_args['doi'])
         else:
             tool_result = None
+            
+            
         ## add the tool's result to the conversation state
         messages.append({
             "role": "tool",

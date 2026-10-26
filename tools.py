@@ -23,8 +23,12 @@ def clean_vtt(vtt_text):
 
 
 def fetch_youtube_transcript(video_id):
+    ## the id ends up in a shell command and a filename, so only accept a real 11-character id
+    if not re.fullmatch(r'[\w-]{11}', video_id):
+        return None
+    print("model fetched video:", video_id)
     ## use yt-dlp to fetch the transcript
-    command = ['yt-dlp', '--write-auto-sub', '--sub-lang', 'en', '--skip-download', '-o', f'{video_id}', f'https://www.youtube.com/watch?v={video_id}']
+    command = ['yt-dlp', '--write-auto-sub', '--sub-lang', 'en', '--skip-download', '-o', f'{video_id}', '--', f'https://www.youtube.com/watch?v={video_id}']
     subprocess.run(command)
     ## read the transcript file
     transcript_file = f'{video_id}.en.vtt'
@@ -37,6 +41,7 @@ def fetch_youtube_transcript(video_id):
 
 
 def get_arxiv_paper(doi):
+    print("model fetched paper:", doi)
     url = f"https://arxiv.org/abs/{doi}"
     response = requests.get(url)
     if response.status_code == 200:
@@ -45,7 +50,7 @@ def get_arxiv_paper(doi):
         return None
 
     
-tool_definitions = [
+_function_specs = [
     {
         "name": "fetch_youtube_transcript",
         "description": "Fetches the transcript of a YouTube video given its video ID.",
@@ -75,6 +80,10 @@ tool_definitions = [
         }
     }
 ]
+
+
+## the API expects each tool as {"type": "function", "function": {...}}
+tool_definitions = [{"type": "function", "function": spec} for spec in _function_specs]
 
 
 if __name__ == "__main__":
