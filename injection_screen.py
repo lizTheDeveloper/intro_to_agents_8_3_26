@@ -26,11 +26,17 @@ INJECTION_PATTERNS = {
     "role-tag spoofing": r"</?\s*(system|assistant|tool|function_call)\s*>|^\s*(system|assistant)\s*:",
     "concealment": r"\b(do not|don't|never)\b.{0,20}\b(tell|inform|mention|reveal|alert)\b.{0,30}\b(user|human|operator)\b",
     "bypass safety": r"\b(bypass|disable|turn off|ignore)\b.{0,20}\b(safety|guardrails?|filters?|restrictions?|content polic)",
-    "agent action request": r"\b(send|post|reply|write|email|forward)\b.{0,40}\b(matrix|room|channel|message|email)\b.{0,40}\b(to|in|on)\b",
-    "exfiltration markup": r"!\[[^\]]*\]\(https?://[^)]*[?&][^)]*\)|<img[^>]+src=[\"']?https?://[^\"'>]*[?&]",
     "pipe to shell": r"curl [^\n|]*\|\s*(ba)?sh",
 }
 COMPILED_PATTERNS = {name: re.compile(p, re.I | re.S | re.M) for name, p in INJECTION_PATTERNS.items()}
+## image markup with a query string is how a model's reply leaks data. Pages are full of harmless badges and images
+## like that, so this is only checked on text our own models write (output_is_clean), not on fetched pages.
+EXFILTRATION_MARKUP = re.compile(r"!\[[^\]]*\]\(https?://[^)]*[?&][^)]*\)|<img[^>]+src=[\"']?https?://[^\"'>]*[?&]", re.I)
+## Unicode "tag" characters spell out invisible ASCII and have no ordinary use in web pages; bidi overrides can
+## reorder what a reader sees. Zero-width spaces are common typography (arXiv uses hundreds), so only a heavy share counts.
+TAG_CHARS = re.compile("[\U000e0000-\U000e007f]")
+BIDI_OVERRIDES = re.compile("[\u202a-\u202e\u2066-\u2069]")
+ZERO_WIDTH = re.compile("[\u200b-\u200f\u2060-\u2064\ufeff]")
 
 ## words attackers scramble ("ignroe all prevoius systme instructions") to slip past keyword filters
 TYPOGLYCEMIA_TARGETS = ("ignore", "previous", "instructions", "system", "prompt", "bypass", "reveal", "disregard", "override")
@@ -100,9 +106,13 @@ def pattern_findings(raw_text):
     scrambled = typoglycemia_hits(text)
     if len(scrambled) >= 2:
         findings.append(f"scrambled attack words: {', '.join(sorted(scrambled))}")
-    hidden = len(HIDDEN_CHARS.findall(raw_text))
-    if hidden > 20:
-        findings.append(f"{hidden} hidden/invisible characters")
+    if TAG_CHARS.search(raw_text):
+        findings.append("invisible unicode tag characters (ASCII smuggling)")
+    if len(BIDI_OVERRIDES.findall(raw_text)) >= 3:
+        findings.append("bidirectional text overrides")
+    zero_width = len(ZERO_WIDTH.findall(raw_text))
+    if zero_width > 50 and zero_width > 0.02 * len(raw_text):
+        findings.append(f"{zero_width} zero-width characters ({zero_width / len(raw_text):.0%} of the text)")
     return list(dict.fromkeys(findings))
 
 
@@ -132,7 +142,7 @@ def screen(raw_text, model_text=None):
 def output_is_clean(*fields):
     """Check text our own models wrote (titles, summaries) before it is stored or shown."""
     joined = " ".join(fields)
-    return not any(p.search(joined) for p in OUTPUT_PATTERNS) and not COMPILED_PATTERNS["exfiltration markup"].search(joined)
+    return not any(p.search(joined) for p in OUTPUT_PATTERNS) and not EXFILTRATION_MARKUP.search(joined)
 
 
 def md_text(text, limit=300):
